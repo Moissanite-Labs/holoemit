@@ -1,0 +1,92 @@
+name: HoloEmit Formal & Reference Verification
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run 3-mode isolated reference verifier parity
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: make verify
+      - name: Run 3-mode isolated negative-control test suite
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: make test
+
+  lean436-formal-kernel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache Lean 4.36.0 toolchain
+        id: cache-lean4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.tool_cache }}/lean-4.36.0
+          key: lean4-v4.36.0-${{ runner.os }}-${{ runner.arch }}-2b7ab1ed
+      - name: Install Lean 4.36.0 from SHA-256-verified official release
+        if: steps.cache-lean4.outputs.cache-hit != 'true'
+        env:
+          LEAN_TARBALL_URL: "https://github.com/leanprover/lean4/releases/download/v4.36.0/lean-4.36.0-linux.tar.zst"
+          LEAN_TARBALL_SHA256: "2b7ab1ed8b92d2e6abfaf41344823b510064dbc9c0260cac73eb496ab2dea6eb"
+          LEAN_DIR: ${{ runner.tool_cache }}/lean-4.36.0
+          TMP_ARCHIVE: ${{ runner.temp }}/lean-4.36.0-linux.tar.zst
+        run: |
+          set -euo pipefail
+          [ "$(uname -m)" = "x86_64" ]
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --retry-delay 5 \
+            -o "$TMP_ARCHIVE" "$LEAN_TARBALL_URL"
+          printf '%s  %s\n' "$LEAN_TARBALL_SHA256" "$TMP_ARCHIVE" | sha256sum -c -
+          mkdir -p "$LEAN_DIR"
+          tar --zstd -xf "$TMP_ARCHIVE" --strip-components=1 -C "$LEAN_DIR"
+          rm -f "$TMP_ARCHIVE"
+      - name: Add Lean 4.36.0 to PATH and verify version
+        env:
+          LEAN_DIR: ${{ runner.tool_cache }}/lean-4.36.0
+        run: |
+          set -euo pipefail
+          echo "$LEAN_DIR/bin" >> "$GITHUB_PATH"
+          "$LEAN_DIR/bin/lean" --version
+          "$LEAN_DIR/bin/lean" --version | grep -Fq "version 4.36.0"
+      - name: Cold lake build, leanchecker --fresh, AxiomAudit, and emitter smoke check
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+          OPENBLAS_NUM_THREADS: "1"
+          OMP_NUM_THREADS: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          cd lean
+          lake build 2>&1 | tee /tmp/holoemit_build.log
+          if grep -qi "warning:" /tmp/holoemit_build.log; then
+            echo "ERROR: Lean build emitted warning"
+            exit 1
+          fi
+          lake env leanchecker --fresh HoloEmit
+          lake env lean AxiomAudit.lean > /tmp/holoemit_axioms.txt
+          cat /tmp/holoemit_axioms.txt
+          .lake/build/bin/holoemit-dump ptx > /tmp/holoemit.ptx
+          .lake/build/bin/holoemit-dump avx512 > /tmp/holoemit_avx512.h
+          cd ..
+          python3 -I -B -c "import pathlib, sys; sys.path.insert(0, '.'); import verify_holoemit as v; lines = [x for x in pathlib.Path('/tmp/holoemit_axioms.txt').read_text().splitlines() if x.strip()]; ok = (len(lines) == 24 and v.detect_lean4_bv_decide_escapes('', lines) == []); sys.exit(0 if ok else 1)"

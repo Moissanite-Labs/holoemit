@@ -1,0 +1,10 @@
+name = "HoloEmit"
+version = "0.1.0"
+defaultTargets = ["HoloEmit", "holoemit-dump"]
+
+[[lean_lib]]
+name = "HoloEmit"
+
+[[lean_exe]]
+name = "holoemit-dump"
+root = "HoloEmitDump"

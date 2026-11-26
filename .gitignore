@@ -1,0 +1,14 @@
+.lake/
+build/
+__pycache__/
+*.py[cod]
+*$py.class
+*.olean
+*.ilean
+*.trace
+*.cubin
+*.ptx
+*.o
+*.so
+*.exe
+.DS_Store
